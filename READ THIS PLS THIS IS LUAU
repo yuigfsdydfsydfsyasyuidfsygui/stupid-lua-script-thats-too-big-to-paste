@@ -1,0 +1,137 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+-- ===== Settings =====
+local SWORD_NAME = "sword"
+local TOOL_NAMES = { "LinkedSword", "Linked Sword" }
+local ANIMATION_ID = "rbxassetid://112626895956196"
+local GIVE_AT = 0.6          -- fraction of the shot at which the sword is handed over
+local FALLBACK_LENGTH = 3    -- used if the animation fails to load
+local EXTRA_TIME = 0.8       -- cinematic keeps going this long after the animation
+local AUTO_EQUIP = true      -- equip the sword when the cinematic ends
+
+local event = Instance.new("RemoteEvent")
+event.Name = "SwordCinematic"
+event.Parent = ReplicatedStorage
+
+local sword
+for _ = 1, 20 do
+	sword = workspace:FindFirstChild(SWORD_NAME, true)
+	if sword then break end
+	task.wait(0.5)
+end
+if not sword then
+	warn("[Sword] Could not find '" .. SWORD_NAME .. "' in workspace")
+	return
+end
+
+local function findTool()
+	for _, name in ipairs(TOOL_NAMES) do
+		local t = ReplicatedStorage:FindFirstChild(name)
+		if t and t:IsA("Tool") then return t end
+	end
+	warn("[Sword] No Tool named LinkedSword found in ReplicatedStorage")
+end
+
+local function swordParts()
+	local parts = {}
+	if sword:IsA("BasePart") then table.insert(parts, sword) end
+	for _, d in ipairs(sword:GetDescendants()) do
+		if d:IsA("BasePart") then table.insert(parts, d) end
+	end
+	return parts
+end
+
+local function removeSword()
+	for _, p in ipairs(swordParts()) do
+		p.CanTouch = false
+		p.CanCollide = false
+		TweenService:Create(p, TweenInfo.new(0.5), { Transparency = 1 }):Play()
+	end
+	task.delay(0.6, function() sword:Destroy() end)
+end
+
+local function giveTool(player)
+	local template = findTool()
+	if not template or not player.Parent then return nil end
+	local char = player.Character
+	local existing = player.Backpack:FindFirstChild(template.Name)
+		or (char and char:FindFirstChild(template.Name))
+	if existing then return existing end
+
+	local tool = template:Clone()
+	tool.Parent = player.Backpack
+
+	local gear = player:FindFirstChild("StarterGear") -- keeps the sword after respawn
+	if gear and not gear:FindFirstChild(template.Name) then
+		template:Clone().Parent = gear
+	end
+	return tool
+end
+
+local taken = false
+
+local function playSequence(player, humanoid, root)
+	local swordPos = sword:GetPivot().Position
+	local wasAnchored = root.Anchored
+	root.Anchored = true
+
+	-- face the sword
+	local flat = Vector3.new(swordPos.X, root.Position.Y, swordPos.Z)
+	if (flat - root.Position).Magnitude > 0.1 then
+		root.CFrame = CFrame.lookAt(root.Position, flat)
+	end
+
+	-- load the animation
+	local track
+	local ok, err = pcall(function()
+		local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", humanoid)
+		local anim = Instance.new("Animation")
+		anim.AnimationId = ANIMATION_ID
+		track = animator:LoadAnimation(anim)
+	end)
+	if not ok then warn("[Sword] Animation failed to load:", err) end
+
+	local length = FALLBACK_LENGTH
+	if track then
+		track.Priority = Enum.AnimationPriority.Action
+		track.Looped = false
+		local t0 = os.clock()
+		while track.Length == 0 and os.clock() - t0 < 2 do task.wait() end
+		if track.Length > 0 then length = track.Length end
+		track:Play()
+	end
+
+	local duration = length + EXTRA_TIME
+	event:FireClient(player, swordPos, duration, GIVE_AT)
+
+	task.wait(duration * GIVE_AT)
+	local tool = giveTool(player)
+	removeSword()
+
+	task.wait(duration * (1 - GIVE_AT))
+	if track then track:Stop() end
+	if root.Parent then root.Anchored = wasAnchored end
+	if AUTO_EQUIP and tool and tool.Parent == player.Backpack and humanoid.Health > 0 then
+		humanoid:EquipTool(tool)
+	end
+end
+
+local function onTouch(hit)
+	if taken then return end
+	local char = hit:FindFirstAncestorOfClass("Model")
+	local player = char and Players:GetPlayerFromCharacter(char)
+	if not player then return end
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	local root = char:FindFirstChild("HumanoidRootPart")
+	if not humanoid or not root or humanoid.Health <= 0 then return end
+
+	taken = true -- only one player can grab the sword
+	task.spawn(playSequence, player, humanoid, root)
+end
+
+for _, p in ipairs(swordParts()) do
+	p.Touched:Connect(onTouch)
+end
+print("[Sword] ready, watching", sword:GetFullName())
